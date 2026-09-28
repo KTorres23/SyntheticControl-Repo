@@ -14,6 +14,13 @@ editor_options:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+In script tags to denote changes. View changes between revised and original version via commit diffs.
+
+* `# [PATH]`: Path-related change to improve reproducibility
+* `# [DATA]`: Changes to GBIF filtering
+
+
 # Load Packages
 ```{r}
 library(sf)
@@ -22,24 +29,37 @@ library(iNEXT)
 library(data.table)
 library(arrow)
 library(units)
+library(here) # [PATH]
+here::i_am("data_cleaning_code/GBIF_analyses.Rmd") # [PATH]
 ```
 
 # Load in Data
 ```{r}
 rm(list = ls())
-setwd("/Users/aska1693/Downloads/Chapter2_SyntheticControl/SyntheticControl-Repo/data_cleaning_code")
+#setwd("/Users/aska1693/Downloads/Chapter2_SyntheticControl/SyntheticControl-Repo/data_cleaning_code") # [PATH]
+
 #test dataset
-cities.test <- read.csv("raw_data/cities.test.csv")
+##cities.test <- read.csv("raw_data/cities.test.csv") # [DATA]
 
 #GBIF Hymenoptera data
-gbif.all <- read.csv("raw_data/Gbif_All.csv", header=T, na.strings=c("","NA"))
+#GBIF.org (12 March 2024) GBIF Occurrence Download https://doi.org/10.15468/dl.jvuxa3
+gbif.all <- fread(
+  here("data", "bees_dataset.csv"),
+  quote = "",
+  header = T,
+  na.strings = c("", "NA")
+) # [DATA] - missing na.strings line
 
 #GBIF All taxa data
+#https://www.gbif.org/occurrence/download/0001517-251009101135966
 setDTthreads(parallel::detectCores())
-gbif.all.taxa <- fread("raw_data/0001517-251009101135966_GBIF_ALL.csv", 
-            header=T, na.strings=c("","NA"),
-            showProgress = TRUE,
-            select = c("decimalLatitude","decimalLongitude","recordedBy","year")) #fast read
+gbif.all.taxa <- fread(
+  here("data", "all_taxa.csv"), # [DATA]
+  header = T,
+  na.strings = c("", "NA"),
+  showProgress = TRUE,
+  select = c("decimalLatitude", "decimalLongitude", "recordedBy", "year")
+) #fast read
 head(gbif.all.taxa)
 #write_parquet(gbif.all.taxa, "GBIF_all_taxa.parquet") #converting to Parquet for future use
 #gbif.all.taxa <- read.csv("raw_data/0001517-251009101135966_GBIF_ALL.csv", header=T, na.strings=c("","NA"))
@@ -51,9 +71,105 @@ head(gbif.all.taxa)
 * Filtering data to just keep bees
 * Inputting *genus spp* in all blank cells in the species column
 ```{r}
-gbif <- gbif.all %>% 
-  filter(gbif.all$family== c("Halictidae","Apidae","Colletidae","Melittidae","Megachilidae","Adrenidae"))%>%
+gbif <- gbif.all %>%
+  filter(
+    gbif.all$family %in%
+      c(
+        "Halictidae",
+        "Apidae",
+        "Colletidae",
+        "Melittidae",
+        "Megachilidae",
+        "Andrenidae"
+      )
+  ) %>% # [DATA] - accounts for fixed %in% logic, Andrenidae typo, and is.na() issue from Line 43
   mutate(species = ifelse(is.na(species), paste0(genus, " spp"), species))
+
+##### [DATA] - Data exploration
+### Updated number of observations
+# revised code captures 604,076 bee observations
+revised_data_count <- gbif |> nrow()
+revised_data_count
+
+# following previous logic, only 98,969 bee observations were extracted
+og_data <- fread(here("data", "bees_dataset.csv"), quote = "") |>
+  filter(
+    gbif.all$family ==
+      c(
+        "Halictidae",
+        "Apidae",
+        "Colletidae",
+        "Melittidae",
+        "Megachilidae",
+        "Adrenidae"
+      )
+  ) %>%
+  mutate(species = ifelse(is.na(species), paste0(genus, " spp"), species))
+
+og_data_count <- og_data |> nrow()
+og_data_count
+
+# Following previous logic, only 16.4% of available bee data from GBIF was used in downstream analyses
+100 - (revised_data_count - og_data_count) / revised_data_count * 100
+
+### Updated number of observations without species-level ID
+# Only 22,357 observations without species-level ID
+not_species_level_count <- gbif |> filter(str_detect(species, "spp")) |> nrow()
+not_species_level_count
+
+# Observations not at the species-level makes up only 3.7% of the total dataset
+# This supports that research-grade observations DO have taxonomic certainty
+## at the species-level, enabling analyses considering species richness
+100 - (revised_data_count - not_species_level_count) / revised_data_count * 100
+
+# Furthermore, there are only 453 observations without a genus-level ID
+not_genus_level_count <- gbif |> filter(is.na(genus)) |> nrow()
+not_genus_level_count
+
+# No other observations lacking taxonomic resolution beyond the family-level
+not_higher_level_count <- gbif |> filter(is.na(family) | is.na(order)) |> nrow()
+
+
+### Visualize differences in previous code logic and new code logic
+viz_data <- bind_rows(og_data, gbif, .id = "code_logic") |>
+  mutate(
+    code_logic = case_when(
+      code_logic == 1 ~ "kaiser_analysis",
+      code_logic == 2 ~ "revised_code"
+    )
+  ) |>
+  select(code_logic, gbifID, order, family, genus, species)
+
+library(scales)
+
+figure <- viz_data |>
+  ggplot(aes(x = family, fill = code_logic)) +
+  geom_bar(position = "dodge") +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(y = "Observations (thousands)")
+
+ggsave(
+  "data_change_figure.png",
+  figure,
+  path = here("figures"),
+  width = 6,
+  height = 4
+)
+
+saveRDS(viz_data, file = here("data", "data_change_figure_data.rds"))
+
+# clean up environment
+rm(
+  gbif.all,
+  revised_data_count,
+  og_data_count,
+  not_species_level_count,
+  not_genus_level_count,
+  not_higher_level_count
+)
 ```
 
 Code for creating smaller testing dataset
@@ -67,13 +183,17 @@ gbif.sub <- gbif[sample(nrow(gbif), 10000), ]
 * Create buffer distances
 ```{r}
 #Convert gbif to sf points
-sf_data <- st_as_sf(gbif, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+sf_data <- st_as_sf(
+  gbif,
+  coords = c("decimalLongitude", "decimalLatitude"),
+  crs = 4326
+)
 
 #Convert cities.test to sf points
 cities.sf <- st_as_sf(cities.test, coords = c("Long", "Lat"), crs = 4326)
 
 #Create 45 km buffers around all cities
-buffer45_distance <- set_units(45000, "m")  # 45 km in meters
+buffer45_distance <- set_units(45000, "m") # 45 km in meters
 cities.buffer <- st_buffer(cities.sf, dist = buffer45_distance)
 ```
 
@@ -84,9 +204,9 @@ Assign all observations to a city
 sf_data <- st_join(sf_data, cities.buffer["City"], join = st_within)
 
 # Fill points outside any city buffer
-sf_data$City45km <- sf_data$City            # Copy joined column
-sf_data$City45km[is.na(sf_data$City45km)] <- "Outside City"  # Default value
-sf_data$City <- NULL  # Optional cleanup
+sf_data$City45km <- sf_data$City # Copy joined column
+sf_data$City45km[is.na(sf_data$City45km)] <- "Outside City" # Default value
+sf_data$City <- NULL # Optional cleanup
 
 # Convert back to data frame if needed
 gbif <- as.data.frame(sf_data)
@@ -116,8 +236,7 @@ cities.test <- cities.test %>%
   ) %>%
   mutate(year = as.numeric(year)) %>%
   left_join(gbif.obs.all, by = c("City" = "City45km", "year")) %>%
-  mutate(n.obs45km = replace_na(n.obs45km, 0)
-  )
+  mutate(n.obs45km = replace_na(n.obs45km, 0))
 
 # Quick check
 summary(cities.test)
@@ -128,43 +247,51 @@ summary(cities.test)
 * Convert gbif data to an sf object
 ```{r}
 #Convert gbif to sf points
-sf_data <- st_as_sf(gbif.all.taxa, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
+sf_data <- st_as_sf(
+  gbif.all.taxa,
+  coords = c("decimalLongitude", "decimalLatitude"),
+  crs = 4326
+)
 ```
 
 Assign all observations to a city
 ```{r}
 # Set Chunk parameters
-chunk_size <- 500000   # 0.5M rows per chunk to fit in RAM
+chunk_size <- 500000 # 0.5M rows per chunk to fit in RAM
 n_chunks <- ceiling(nrow(gbif.all.taxa) / chunk_size)
 
 # Process chunks
 for (i in 1:n_chunks) {
   cat("Processing chunk", i, "of", n_chunks, "\n")
-  
+
   # Extract current chunk
   start_row <- (i - 1) * chunk_size + 1
   end_row <- min(i * chunk_size, nrow(gbif.all.taxa))
   gbif_chunk <- gbif.all.taxa[start_row:end_row, ]
-  
+
   # Convert chunk to sf
-  sf_chunk <- st_as_sf(gbif_chunk, coords = c("decimalLongitude", "decimalLatitude"), crs = 4326)
-  
+  sf_chunk <- st_as_sf(
+    gbif_chunk,
+    coords = c("decimalLongitude", "decimalLatitude"),
+    crs = 4326
+  )
+
   # Vectorized spatial join
   sf_chunk <- st_join(sf_chunk, cities.buffer["City"], join = st_within)
-  
+
   # Assign City45km column
   sf_chunk$City45km <- sf_chunk$City
   sf_chunk$City45km[is.na(sf_chunk$City45km)] <- "Outside City"
   sf_chunk$City <- NULL
-  
+
   # Convert to data.frame and drop geometry before saving
   sf_df <- as.data.frame(sf_chunk)
   sf_df$geometry <- NULL
-  
+
   # Save chunk to Parquet
   chunk_file <- paste0("gbif_chunk_", i, ".parquet")
   write_parquet(sf_df, chunk_file)
-  
+
   # Free memory
   rm(sf_chunk, gbif_chunk, sf_df)
   gc()
@@ -188,8 +315,7 @@ gbif.obs.observers <- gbif.all.taxa %>%
 # Merge into cities.test
 cities.test <- cities.test %>%
   left_join(gbif.obs.observers, by = c("City" = "City45km", "year")) %>%
-  mutate(unique_observers = replace_na(unique_observers, 0)
-  )
+  mutate(unique_observers = replace_na(unique_observers, 0))
 ```
 
 #```{r}
@@ -265,23 +391,30 @@ cities.pool <- cities.test %>%
   filter(n.obs45km > 75 & n.obs45km < 500)
 
 #Extract the city column
-cities.pool <-cities.pool$City
+cities.pool <- cities.pool$City
 
 #Keeping subset of cities in final dataframe
 #Removing Boston, Atlanta and Baltimore for experiencing this treatment. Removing Houston for abnormal abundance spike in 2016.
 cities.test <- cities.test %>%
-  filter(City != "Boston"& City != "Atlanta" & City != "Baltimore" & City != "Houston")%>%
+  filter(
+    City != "Boston" &
+      City != "Atlanta" &
+      City != "Baltimore" &
+      City != "Houston"
+  ) %>%
   filter(City %in% cities.pool)
 ```
 
 Adding Socioeconomic variables
 ```{r}
-setwd("/Users/aska1693/Downloads/Chapter2_SyntheticControl/SyntheticControl-Repo/data_cleaning_code")
+setwd(
+  "/Users/aska1693/Downloads/Chapter2_SyntheticControl/SyntheticControl-Repo/data_cleaning_code"
+)
 socio.var <- read.csv("raw_data/SCM_socioeconomic - predictors.csv")
 
 summary(socio.var)
 socio.var <- socio.var %>%
-    select(City,Median_HH_Income,PovertyIndex,BA_Population,MedianHomeValue)
+  select(City, Median_HH_Income, PovertyIndex, BA_Population, MedianHomeValue)
 
 cities.test <- left_join(cities.test, socio.var, by = "City")
 ```
@@ -289,6 +422,8 @@ cities.test <- left_join(cities.test, socio.var, by = "City")
 # Save dataframe with summarized GBIF variables
 ```{r}
 #Save processed data files in output folder
-setwd("/Users/aska1693/Downloads/Chapter2_SyntheticControl/SyntheticControl-Repo")
+setwd(
+  "/Users/aska1693/Downloads/Chapter2_SyntheticControl/SyntheticControl-Repo"
+)
 write.csv(cities.test, "data/cities.scm.input.csv", row.names = FALSE)
 ```
